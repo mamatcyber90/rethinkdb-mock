@@ -1,5 +1,5 @@
 
-# rethinkdb-mock v0.1.0
+# rethinkdb-mock v0.2.0
 
 An in-memory RethinkDB used for testing.
 
@@ -37,6 +37,14 @@ If this doesn't convince you, please open an issue explaining your reasoning! :+
 
 ### Getting started
 
+1. Install from Github:
+
+```sh
+npm install --save-dev aleclarson/rethinkdb-mock#0.1.0
+```
+
+2. Put some boilerplate in your test environment:
+
 ```js
 const rethinkdb = require('rethinkdb-mock')
 
@@ -48,7 +56,11 @@ mock('rethinkdbdash', rethinkdb)
 const db = rethinkdb({
   name: 'test' // The default value
 })
+```
 
+3. Use it in your test suites:
+
+```
 describe('Some test suite', () => {
 
   // Reset the database between suites.
