@@ -4,82 +4,101 @@ assertType = require "assertType"
 sliceArray = require "sliceArray"
 setType = require "setType"
 
-Selection = require "./Selection"
-Sequence = require "./Sequence"
-Datum = require "./Datum"
+Query = require "./Query"
 utils = require "./utils"
 uuid = require "./utils/uuid"
 
 {isArray} = Array
 
-i = 1
-GET = i++
-GET_ALL = i++
-INSERT = i++
-DELETE = i++
+parseArgs = Query::_parseArgs
+runQuery = Query::_run
+define = Object.defineProperty
 
-Table = (db, tableId, action) ->
-  self = (key) -> Sequence(self)._access key
-  self._db = db
-  self._tableId = tableId
-  self._action = action if action
-  return setType self, Table
+Table = (db, tableId) ->
+  query = (key) -> Query(query, "TABLE").bracket key
+  query._db = db
+  query._type = "TABLE"
+  query._tableId = tableId
+  return setType query, Table
 
-methods = Table.prototype
+methods = {}
 
 methods.do = (callback) ->
   throw Error "Tables must be coerced to arrays before calling `do`"
 
 methods.get = (rowId) ->
-  Selection Table @_db, @_tableId, [GET, rowId]
+
+  if rowId is undefined
+    throw Error "Cannot convert `undefined` with r.expr()"
+
+  self = Table @_db, @_tableId
+  self._action = "get"
+  self._rowId = rowId
+  return Query self, "SELECTION"
 
 methods.getAll = ->
-  Sequence Table @_db, @_tableId, [GET_ALL, sliceArray arguments]
+  self = Table @_db, @_tableId
+  self._action = "getAll"
+  self._args = arguments
+  parseArgs.call self
+  return Query self, "SEQUENCE"
 
-methods.insert = (value, options) ->
-  Datum Table @_db, @_tableId, [INSERT, value, options]
+methods.insert = (rows, options) ->
+  self = Table @_db, @_tableId
+  self._action = "insert"
+  self._args = arguments
+  parseArgs.call self
+  return Query self, "DATUM"
 
 methods.delete = ->
-  Datum Table @_db, @_tableId, [DELETE]
+  self = Table @_db, @_tableId
+  self._action = "delete"
+  return Query self, "DATUM"
 
-do ->
-  keys = "nth getField offsetsOf update filter orderBy limit slice pluck without fold".split " "
-  keys.forEach (key) ->
+"nth getField offsetsOf orderBy filter fold count limit slice merge pluck without update"
+  .split(" ").forEach (key) ->
     methods[key] = ->
-      self = Sequence this
-      self[key].apply self, arguments
+      Query(this, "TABLE")._then key, arguments
+    return
 
 methods.run = ->
-  Promise.resolve().then =>
-    return @_run() if @_action
-    return utils.clone @_run()
+  Promise.resolve()
+    .then runQuery.bind this
 
 methods.then = (onFulfilled) ->
   @run().then onFulfilled
 
-methods._run = (context) ->
+methods._eval = (ctx) ->
+  ctx.type = @_type
+  ctx.tableId = @_tableId
 
   unless table = @_db._tables[@_tableId]
     throw Error "Table `#{@_tableId}` does not exist"
 
-  context?.tableId = @_tableId
-
-  unless action = @_action
+  unless @_action
     return table
 
-  switch action[0]
+  args = utils.resolve @_args
+  switch @_action
 
-    when GET
-      return getRow table, action[1], context
+    when "get"
+      return getRow table, @_rowId, ctx
 
-    when GET_ALL
-      return getRows table, action[1]
+    when "getAll"
+      return getRows table, args
 
-    when INSERT
-      return insertRows table, action[1], action[2]
+    when "insert"
+      return insertRows table, args[0], args[1]
 
-    when DELETE
+    when "delete"
       return clearTable table
+
+methods._run = runQuery
+
+Object.keys(methods).forEach (key) ->
+  define Table.prototype, key,
+    value: methods[key]
+    writable: yes
 
 module.exports = Table
 
@@ -87,7 +106,7 @@ module.exports = Table
 # Helpers
 #
 
-getRow = (table, rowId, context) ->
+getRow = (table, rowId, ctx) ->
 
   if rowId is undefined
     throw Error "Argument 1 to get may not be `undefined`"
@@ -98,32 +117,27 @@ getRow = (table, rowId, context) ->
   if (rowId is null) or isConstructor(rowId, Object)
     throw Error "Primary keys must be either a number, string, bool, pseudotype or array"
 
+  ctx.rowId = rowId
+  ctx.rowIndex = -1
+
   index = -1
   while ++index < table.length
     if table[index].id is rowId
-      context.rowId = rowId
-      context.rowIndex = index
+      ctx.rowIndex = index
       return table[index]
 
   return null
 
 getRows = (table, args) ->
-
   return [] unless args.length
 
   if isConstructor args[args.length - 1], Object
     key = args.pop().index
 
   key ?= "id"
-  assertType key, String
+  utils.expect key, "STRING"
 
   args.forEach (arg, index) ->
-
-    if arg is undefined
-      throw Error "Argument #{index} to getAll may not be `undefined`"
-
-    if utils.isQuery arg
-      args[index] = arg._run()
 
     if arg is null
       throw Error "Keys cannot be NULL"
@@ -139,22 +153,8 @@ getRows = (table, args) ->
         return yes
     return no
 
-findRow = (table, rowId) ->
-
-  if rowId is undefined
-    throw Error "Argument 1 to get may not be `undefined`"
-
-  if utils.isQuery rowId
-    rowId = rowId._run()
-
-  if (rowId is null) or isConstructor(rowId, Object)
-    throw Error "Primary keys must be either a number, string, bool, pseudotype or array"
-
-  table.find (row) -> row.id is rowId
-
 # TODO: Support options argument.
 insertRows = (table, rows) ->
-  rows = utils.resolve rows
   rows = [rows] unless isArray rows
 
   errors = 0
@@ -186,7 +186,20 @@ insertRows = (table, rows) ->
 
   return res
 
+findRow = (table, rowId) ->
+
+  if rowId is undefined
+    throw Error "Argument 1 to get may not be `undefined`"
+
+  if utils.isQuery rowId
+    rowId = rowId._run()
+
+  if (rowId is null) or isConstructor(rowId, Object)
+    throw Error "Primary keys must be either a number, string, bool, pseudotype or array"
+
+  table.find (row) -> row.id is rowId
+
 clearTable = (table) ->
-  count = table.length
+  deleted = table.length
   table.length = 0
-  return {deleted: count}
+  return {deleted}

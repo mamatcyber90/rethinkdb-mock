@@ -2,6 +2,7 @@
 isConstructor = require "isConstructor"
 assertType = require "assertType"
 sliceArray = require "sliceArray"
+hasKeys = require "hasKeys"
 
 {isArray} = Array
 
@@ -25,80 +26,21 @@ utils.expect = (value, expectedType) ->
   if type isnt expectedType
     throw Error "Expected type #{expectedType} but found #{type}"
 
-utils.expectArray = (value) ->
-  type = utils.typeOf value
-  if type isnt "ARRAY"
-    throw Error "Cannot convert #{type} to SEQUENCE"
-
 utils.isQuery = (queryTypes, value) ->
   return no unless value
   return yes if ~queryTypes.indexOf value.constructor
   return no
 
-# TODO: Support variadic arguments.
-utils.do = (self, callback) ->
-  query = callback self
-
-  if query is undefined
-    throw Error "Return value may not be `undefined`"
-
-  unless utils.isQuery query
-    query = self._db.expr query
-
-  input = undefined
-  getInput = ->
-    return input if input isnt undefined
-    return input = self._query._run()
-
-  self._run = run = ->
-    self._run = getInput
-    output = query._run()
-    input = undefined
-    self._run = run
-    return output
-
-  return self
-
-isNullError = (m) ->
-  return yes if m is "Index out of bounds"
-  return yes if m.startsWith "No attribute"
-  return yes if ~m.indexOf "NULL"
-  return no
-
-utils.default = (self, value) ->
-  self._run = ->
-    try result = self._query._run()
-    catch error
-      throw error unless isNullError error.message
-    return result ? value
-  return self
-
 utils.getField = (value, attr) ->
-
-  if utils.isQuery attr
-    attr = attr._run()
-
-  utils.expect attr, "STRING"
-  unless value.hasOwnProperty attr
-    throw Error "No attribute `#{attr}` in object"
-
-  return value[attr]
+  return value[attr] if value.hasOwnProperty attr
+  throw Error "No attribute `#{attr}` in object"
 
 utils.hasFields = (value, attrs) ->
-
-  for attr, index in attrs
-
-    if attr is undefined
-      throw Error "Argument #{index} to hasFields may not be `undefined`"
-
-    unless isConstructor attr, String
-      throw Error "Invalid path argument"
-
+  for attr in attrs
     return no unless value.hasOwnProperty attr
   return yes
 
 utils.equals = (value1, value2) ->
-  value2 = utils.resolve value2
 
   if isArray value1
     return no unless isArray value2
@@ -133,10 +75,8 @@ utils.without = (input, keys) ->
   return output
 
 utils.merge = (output, inputs) ->
-  assertType output, Object
-  assertType inputs, Array
-
   output = utils.clone output
+
   for input in inputs
     output = merge output, input
 
@@ -146,6 +86,10 @@ utils.merge = (output, inputs) ->
 
 # Returns true if the `patch` changed at least one value.
 utils.update = (object, patch) ->
+  return no if patch is null
+
+  if "OBJECT" isnt utils.typeOf patch
+    throw Error "Inserted value must be an OBJECT (got #{utils.typeOf patch})"
 
   if patch.hasOwnProperty "id"
     if patch.id isnt object.id
@@ -210,7 +154,7 @@ pluckWithArray = (array, input, output) ->
   array = utils.flatten array
   for key in array
 
-    if typeof key is "string"
+    if isConstructor key, String
       if input.hasOwnProperty key
         output[key] = input[key]
 
@@ -228,18 +172,27 @@ pluckWithObject = (object, input, output) ->
       if input.hasOwnProperty key
         output[key] = input[key]
 
-    else if typeof value is "string"
-      if isConstructor input[key], Object
-        output[key] = {}
-        output[key][value] = input[key][value]
+    else if isConstructor value, String
+      continue unless isConstructor input[key], Object
+      continue unless input[key].hasOwnProperty value
+      output[key] = {} unless isConstructor output[key], Object
+      output[key][value] = input[key][value]
 
     else if isArray value
-      if isConstructor input[key], Object
-        output[key] = pluckWithArray value, input[key], output
+      continue unless isConstructor input[key], Object
+      if isConstructor output[key], Object
+        pluckWithArray value, input[key], output[key]
+      else
+        value = pluckWithArray value, input[key], {}
+        output[key] = value if hasKeys value
 
     else if isConstructor value, Object
-      if isConstructor input[key], Object
-        output[key] = pluckWithObject value, input[key], {}
+      continue unless isConstructor input[key], Object
+      if isConstructor output[key], Object
+        pluckWithObject value, input[key], output[key]
+      else
+        value = pluckWithObject value, input[key], {}
+        output[key] = value if hasKeys value
 
     else throw TypeError "Invalid path argument"
 
@@ -251,14 +204,15 @@ merge = (output, input) ->
   # Non-objects overwrite the output.
   return input unless isConstructor input, Object
 
-  # Ensure the output is an object before merging.
-  output = {} unless isConstructor output, Object
+  # Nothing to merge into.
+  return input unless isConstructor output, Object
 
   for key, value of input
-    output[key] =
+    if isConstructor value, Object
       if isConstructor output[key], Object
       then merge output[key], value
-      else value
+      else output[key] = value
+    else output[key] = value
 
   return output
 
@@ -294,9 +248,6 @@ resolveArray = (values) ->
   clone = []
   for value, index in values
 
-    if value is undefined
-      throw Error "Cannot wrap undefined with r.expr()"
-
     if isArray value
       clone.push resolveArray value
 
@@ -313,9 +264,6 @@ resolveArray = (values) ->
 resolveObject = (values) ->
   clone = {}
   for key, value of values
-
-    if value is undefined
-      throw Error "Object field '#{key}' may not be undefined"
 
     if isArray value
       clone[key] = resolveArray value
