@@ -27,9 +27,7 @@ utils.expect = (value, expectedType) ->
     throw Error "Expected type #{expectedType} but found #{type}"
 
 utils.isQuery = (queryTypes, value) ->
-  return no unless value
-  return yes if ~queryTypes.indexOf value.constructor
-  return no
+  value and inherits value, queryTypes
 
 utils.getField = (value, attr) ->
   return value[attr] if value.hasOwnProperty attr
@@ -120,18 +118,29 @@ utils.clone = (values) ->
 
 # Resolves any queries found in a value.
 # Throws an error for undefined values.
-utils.resolve = (value) ->
+utils.resolve = (value, ctx) ->
+
+  if utils.isQuery value
+    return value._run ctx
+
+  ctx?.type = "DATUM"
+
   if isArray value
     return resolveArray value
+
   if isConstructor value, Object
     return resolveObject value
-  if utils.isQuery value
-    return value._run()
+
   return value
 
 #
 # Helpers
 #
+
+inherits = (value, types) ->
+  for type in types
+    return yes if value instanceof type
+  return no
 
 isArrayOrObject = (value) ->
   isArray(value) or isConstructor(value, Object)

@@ -2,6 +2,7 @@
 isConstructor = require "isConstructor"
 assertType = require "assertType"
 sliceArray = require "sliceArray"
+setType = require "setType"
 
 Table = require "./Table"
 Query = require "./Query"
@@ -13,11 +14,16 @@ define = Object.defineProperty
 
 Database = (name) ->
   assertType name, String
-  @_name = name
-  define this, "_tables",
+
+  self = (value) ->
+    self.expr value
+
+  self._name = name
+  define self, "_tables",
     value: {}
     writable: yes
-  return this
+
+  return setType self, Database
 
 methods = {}
 
@@ -41,7 +47,20 @@ methods.tableDrop = (tableId) ->
 methods.uuid = require "./utils/uuid"
 
 methods.typeOf = (value) ->
-  Query._expr(value).typeOf()
+  if arguments.length isnt 1
+    throw Error "`typeOf` takes 1 argument, #{arguments.length} provided"
+  return Query._expr(value).typeOf()
+
+methods.branch = (cond) ->
+  args = sliceArray arguments, 1
+  if args.length < 2
+    throw Error "`branch` takes at least 3 arguments, #{args.length + 1} provided"
+  return Query._branch Query._expr(cond), args
+
+methods.do = (arg) ->
+  unless arguments.length
+    throw Error "`do` takes at least 1 argument, 0 provided"
+  return Query._do Query._expr(arg), sliceArray arguments, 1
 
 # TODO: You cannot have a sequence nested in an expression. You must use `coerceTo` first.
 methods.expr = Query._expr

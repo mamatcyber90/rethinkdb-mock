@@ -43,9 +43,9 @@ methods = {}
 methods.default = (value) ->
   Query._default this, value
 
-# TODO: Support variadic arguments.
-methods.do = (callback) ->
-  Result(this)._do callback
+methods.do = ->
+  args = sliceArray arguments
+  return Query._do this, args
 
 variadic "eq ne gt lt ge le or and add sub mul div"
 
@@ -73,6 +73,12 @@ variadic "slice merge pluck without"
 
 methods.typeOf = ->
   @_then "typeOf"
+
+methods.branch = ->
+  args = sliceArray arguments
+  if args.length < 2
+    throw Error "`branch` takes at least 2 arguments, #{args.length} provided"
+  return Query._branch this, args
 
 methods.update = (patch) ->
   @_then "update", arguments
@@ -165,18 +171,72 @@ methods._run = (ctx = {}) ->
 
 statics = {}
 
+statics._do = (parent, args) ->
+
+  unless args.length
+    return parent
+
+  self = Query()
+  self._parent = parent
+
+  last = args.pop()
+  args.unshift parent
+
+  if isConstructor last, Function
+    args = args.slice(0, last.length).map Result
+    query = last.apply null, args
+
+    if query is undefined
+      throw Error "Anonymous function returned `undefined`. Did you forget a `return`?"
+
+    unless utils.isQuery query
+      query = Query._expr query
+
+    self._eval = (ctx) ->
+      result = query._eval ctx
+      args.forEach (arg) -> arg._reset()
+      return result
+    return self
+
+  self._eval = (ctx) ->
+    args.forEach utils.resolve
+    utils.resolve last, ctx
+  return self
+
 statics._default = (parent, value) ->
 
   unless utils.isQuery value
     value = Query._expr value
 
-  self = Query parent
+  self = Query()
+  self._parent = parent
   self._eval = (ctx) ->
     try result = parent._eval ctx
     catch error
       throw error unless isNullError error
     return result ? value._eval ctx
+  return self
 
+statics._branch = (cond, args) ->
+
+  if args.length % 2
+    throw Error "`branch` cannot be called with an even number of arguments"
+
+  lastIndex = args.length - 1
+
+  self = Query()
+  self._parent = cond
+  self._eval = (ctx) ->
+
+    unless isFalse cond._eval {}
+      return utils.resolve args[0], ctx
+
+    index = -1
+    while (index += 2) isnt lastIndex
+      unless isFalse utils.resolve args[index]
+        return utils.resolve args[index + 1], ctx
+
+    return utils.resolve args[lastIndex], ctx
   return self
 
 statics._expr = (expr) ->
@@ -187,13 +247,12 @@ statics._expr = (expr) ->
   if isConstructor(expr, Number) and not isFinite expr
     throw Error "Cannot convert `#{expr}` to JSON"
 
-  self = Query()
-
   if utils.isQuery expr
-    self._eval = (ctx) ->
-      return expr._run ctx
+    return expr
 
-  else if isArrayOrObject expr
+  self = Query null, "DATUM"
+
+  if isArrayOrObject expr
     values = expr
     expr = if isArray values then [] else {}
     Object.keys(values).forEach (key) ->
@@ -203,19 +262,17 @@ statics._expr = (expr) ->
         expr[key] = Query._expr value
         return
 
-      if value._type is "DATUM"
+      if /DATUM|SELECTION/.test value._type
         expr[key] = value
         return
 
       throw Error "Expected type DATUM but found #{value._type}"
 
-    self._type = "DATUM"
     self._eval = (ctx) ->
       ctx.type = @_type
       return utils.resolve expr
 
   else
-    self._type = "DATUM"
     self._eval = (ctx) ->
       ctx.type = @_type
       return expr
@@ -240,6 +297,9 @@ module.exports = Query
 #
 # Helpers
 #
+
+isFalse = (value) ->
+  (value is null) or (value is false)
 
 isArrayOrObject = (value) ->
   isArray(value) or isConstructor(value, Object)
