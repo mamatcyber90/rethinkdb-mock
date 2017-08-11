@@ -2,7 +2,7 @@
 isConstructor = require "isConstructor"
 assertType = require "assertType"
 sliceArray = require "sliceArray"
-setType = require "setType"
+setProto = require "setProto"
 
 Query = require "./Query"
 utils = require "./utils"
@@ -15,11 +15,11 @@ runQuery = Query::_run
 define = Object.defineProperty
 
 Table = (db, tableId) ->
-  query = (key) -> Query(query, "TABLE").bracket key
+  query = (key) -> query.bracket key
   query._db = db
   query._type = "TABLE"
   query._tableId = tableId
-  return setType query, Table
+  return setProto query, Table.prototype
 
 methods = {}
 
@@ -55,7 +55,7 @@ methods.delete = ->
   self._action = "delete"
   return Query self, "DATUM"
 
-"nth getField offsetsOf orderBy filter fold count limit slice merge pluck without update"
+"nth bracket getField offsetsOf contains orderBy filter fold count limit slice merge pluck without update"
   .split(" ").forEach (key) ->
     methods[key] = ->
       Query(this, "TABLE")._then key, arguments
@@ -153,7 +153,7 @@ getRows = (table, args) ->
         return yes
     return no
 
-# TODO: Support options argument.
+# TODO: Support `insert` options argument.
 insertRows = (table, rows) ->
   rows = [rows] unless isArray rows
 

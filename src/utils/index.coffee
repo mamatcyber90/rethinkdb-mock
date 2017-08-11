@@ -59,12 +59,10 @@ utils.flatten = (input, output = []) ->
     else output.push value
   return output
 
-# TODO: Support sub-queries as keys.
 utils.pluck = (input, keys) ->
   pluckWithArray keys, input, {}
 
-# TODO: Support sub-queries as keys.
-# TODO: Support nested arrays/objects for `without`.
+# TODO: Support nested objects for `without`.
 utils.without = (input, keys) ->
   output = {}
   for key, value of input

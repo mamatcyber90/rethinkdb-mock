@@ -8,6 +8,8 @@ seq = require "./utils/seq"
 
 {isArray} = Array
 
+seqRE = /TABLE|SEQUENCE/
+
 actions = exports
 
 actions.eq = (result, args) ->
@@ -99,7 +101,7 @@ actions.nth = (result, index) ->
   utils.expect result, "ARRAY"
   utils.expect index, "NUMBER"
 
-  if index < -1 and /TABLE|SEQUENCE/.test @type
+  if index < -1 and seqRE.test @type
     throw Error "Cannot use an index < -1 on a stream"
 
   return seq.nth result, index
@@ -109,7 +111,7 @@ actions.bracket = (result, key) ->
 
   if type is "NUMBER"
 
-    if key < -1 and /TABLE|SEQUENCE/.test @type
+    if key < -1 and seqRE.test @type
       throw Error "Cannot use an index < -1 on a stream"
 
     return seq.nth result, key
@@ -161,12 +163,6 @@ actions.hasFields = (result, attrs) ->
 actions.offsetsOf = (array, value) ->
   utils.expect array, "ARRAY"
 
-  if value is undefined
-    throw Error "Argument 1 to offsetsOf may not be `undefined`"
-
-  if utils.isQuery value
-    value = value._run()
-
   if isConstructor value, Function
     throw Error "Function argument not yet implemented"
 
@@ -174,6 +170,17 @@ actions.offsetsOf = (array, value) ->
   for value2, index in array
     offsets.push index if utils.equals value2, value
   return offsets
+
+# TODO: Support `contains` function argument
+actions.contains = (array, value) ->
+  utils.expect array, "ARRAY"
+
+  if isConstructor value, Function
+    throw Error "Function argument not yet implemented"
+
+  for value2 in array
+    return yes if utils.equals value, value2
+  return no
 
 # TODO: Support sorting by an array/object value.
 # TODO: Support `orderBy` function argument
@@ -186,34 +193,71 @@ actions.orderBy = (array, value) ->
   else if isConstructor value, String
     index = value
 
+  utils.expect index, "STRING"
   sorter =
     if DESC
     then sortDescending index
     else sortAscending index
 
-  utils.expect index, "STRING"
   return array.slice().sort sorter
 
 actions.filter = (array, filter, options) ->
   utils.expect array, "ARRAY"
-  return seq.filter array, filter, options
+
+  if options isnt undefined
+    utils.expect options, "OBJECT"
+    # TODO: Support `default` option
+
+  matchers = []
+  if isConstructor filter, Object
+
+    matchers.push (values) ->
+      utils.expect values, "OBJECT"
+      return yes
+
+    Object.keys(filter).forEach (key) ->
+      matchers.push (values) ->
+        utils.equals values[key], filter[key]
+
+  # TODO: Support `filter` function argument
+  else if isConstructor filter, Function
+    throw Error "Filter functions are not implemented yet"
+
+  # The native API returns the sequence when
+  # the filter is neither an object nor function.
+  else return array
+
+  return array.filter (row) ->
+    for matcher in matchers
+      return no unless matcher row
+    return yes
 
 actions.fold = ->
   throw Error "Not implemented"
+
+actions.isEmpty = (array) ->
+  utils.expect array, "ARRAY"
+  return array.length is 0
 
 actions.count = (array) ->
   utils.expect array, "ARRAY"
   return array.length
 
+actions.skip = (array, count) ->
+  utils.expect array, "ARRAY"
+  utils.expect count, "NUMBER"
+
+  if count < 0 and seqRE.test @type
+    throw Error "Cannot use a negative left index on a stream"
+
+  return array.slice count
+
 actions.limit = (array, count) ->
   utils.expect array, "ARRAY"
-
-  if utils.isQuery count
-    count = count._run()
-
   utils.expect count, "NUMBER"
+
   if count < 0
-    throw Error "Cannot call `limit` with a negative number"
+    throw Error "LIMIT takes a non-negative argument"
 
   return array.slice 0, count
 

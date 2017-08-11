@@ -2,7 +2,7 @@
 isConstructor = require "isConstructor"
 assertType = require "assertType"
 sliceArray = require "sliceArray"
-setType = require "setType"
+setProto = require "setProto"
 
 Table = require "./Table"
 Query = require "./Query"
@@ -15,15 +15,14 @@ define = Object.defineProperty
 Database = (name) ->
   assertType name, String
 
-  self = (value) ->
-    self.expr value
+  r = (value) -> r.expr value
+  r._name = name
 
-  self._name = name
-  define self, "_tables",
+  define r, "_tables",
     value: {}
     writable: yes
 
-  return setType self, Database
+  return setProto r, Database.prototype
 
 methods = {}
 
@@ -32,11 +31,16 @@ methods.init = (tables) ->
   @_tables = tables
   return
 
+methods.load = ->
+  filePath = require("path").resolve.apply null, arguments
+  json = require("fs").readFileSync filePath, "utf8"
+  @_tables = JSON.parse json
+  return
+
 methods.table = (tableId) ->
-  self = Table this, tableId
   if tableId is undefined
-    self._error = Error "Cannot convert `undefined` with r.expr()"
-  return self
+    throw Error "Cannot convert `undefined` with r.expr()"
+  return Table this, tableId
 
 methods.tableCreate = (tableId) ->
   throw Error "Not implemented"
@@ -76,9 +80,8 @@ methods.object = ->
     if arg is undefined
       throw Error "Argument #{index} to object may not be `undefined`"
 
-  self = Query()
-  self._type = "DATUM"
-  self._eval = (ctx) ->
+  query = Query null, "DATUM"
+  query._eval = (ctx) ->
     result = {}
 
     index = 0
@@ -90,19 +93,13 @@ methods.object = ->
 
     ctx.type = @_type
     return result
-  return self
+  return query
 
 # TODO: Support `args`
 # methods.args = (array) ->
 
 methods.asc = (index) -> {ASC: yes, index}
 methods.desc = (index) -> {DESC: yes, index}
-
-# TODO: Support `do`
-# methods.do = ->
-
-# TODO: Support `branch`
-# methods.branch = ->
 
 # TODO: Support `row`
 # methods.row = do ->
