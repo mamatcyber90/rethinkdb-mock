@@ -1,5 +1,4 @@
 
-isConstructor = require "isConstructor"
 assertType = require "assertType"
 sliceArray = require "sliceArray"
 setProto = require "setProto"
@@ -11,6 +10,7 @@ utils = require "./utils"
 {isArray} = Array
 
 define = Object.defineProperty
+tableRE = /^[A-Z0-9_]+$/i
 
 Database = (name) ->
   assertType name, String
@@ -20,7 +20,7 @@ Database = (name) ->
 
   define r, "_tables",
     value: {}
-    writable: yes
+    writable: true
 
   return setProto r, Database.prototype
 
@@ -28,7 +28,12 @@ methods = {}
 
 methods.init = (tables) ->
   assertType tables, Object
-  @_tables = tables
+  for tableId, table of tables
+    unless tableRE.test tableId
+      throw Error "Table name `#{tableId}` invalid (Use A-Za-z0-9_ only)"
+
+    assertType table, Array
+    @_tables[tableId] = table
   return
 
 methods.load = ->
@@ -42,11 +47,27 @@ methods.table = (tableId) ->
     throw Error "Cannot convert `undefined` with r.expr()"
   return Table this, tableId
 
+# TODO: Support `options` argument
 methods.tableCreate = (tableId) ->
-  throw Error "Not implemented"
+  assertType tableId, String
+  unless tableRE.test tableId
+    throw Error "Table name `#{tableId}` invalid (Use A-Za-z0-9_ only)"
+
+  if @_tables.hasOwnProperty tableId
+    throw Error "Table `#{@_name + "." + tableId}` already exists"
+
+  @_tables[tableId] = []
+  return Query._expr {tables_created: 1}
 
 methods.tableDrop = (tableId) ->
-  throw Error "Not implemented"
+  assertType tableId, String
+  unless tableRE.test tableId
+    throw Error "Table name `#{tableId}` invalid (Use A-Za-z0-9_ only)"
+
+  if delete @_tables[tableId]
+    return Query._expr {tables_dropped: 1}
+
+  throw Error "Table `#{@_name + "." + tableId}` does not exist"
 
 methods.uuid = require "./utils/uuid"
 
@@ -68,6 +89,37 @@ methods.do = (arg) ->
 
 # TODO: You cannot have a sequence nested in an expression. You must use `coerceTo` first.
 methods.expr = Query._expr
+
+methods.row = Query._row
+
+methods.args = (args) ->
+
+  # TODO: Support passing `r([])` to `r.args`
+  if utils.isQuery args
+    throw Error "The first argument of `r.args` cannot be a query (yet)"
+
+  utils.expect args, "ARRAY"
+  args = args.map (arg) ->
+    if utils.isQuery(arg) and arg._lazy
+      throw Error "Implicit variable `r.row` cannot be used inside `r.args`"
+    return Query._expr arg
+
+  query = Query null, "ARGS"
+  query._eval = (ctx) ->
+    ctx.type = "DATUM"
+
+    values = []
+    args.forEach (arg) ->
+
+      if arg._type is "ARGS"
+        values = values.concat arg._run()
+        return
+
+      values.push arg._run()
+      return
+
+    return values
+  return query
 
 # TODO: You cannot have a sequence nested in an object. You must use `coerceTo` first.
 methods.object = ->
@@ -95,17 +147,10 @@ methods.object = ->
     return result
   return query
 
-# TODO: Support `args`
-# methods.args = (array) ->
+methods.asc = (index) -> {ASC: true, index}
+methods.desc = (index) -> {DESC: true, index}
 
-methods.asc = (index) -> {ASC: yes, index}
-methods.desc = (index) -> {DESC: yes, index}
-
-# TODO: Support `row`
-# methods.row = do ->
-
-Object.keys(methods).forEach (key) ->
-  define Database.prototype, key,
-    value: methods[key]
+utils.each methods, (value, key) ->
+  define Database.prototype, key, {value}
 
 module.exports = Database

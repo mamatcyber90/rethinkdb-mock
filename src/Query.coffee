@@ -4,12 +4,12 @@ sliceArray = require "sliceArray"
 setProto = require "setProto"
 
 actions = require "./actions"
-Result = require "./Result"
 utils = require "./utils"
 
 {isArray} = Array
 
 define = Object.defineProperty
+seqRE = /TABLE|SELECTION<ARRAY>/
 
 Query = (parent, type) ->
   query = (key) -> query.bracket key
@@ -18,6 +18,7 @@ Query = (parent, type) ->
     query._db = parent._db
     query._type = type or parent._type
     query._parent = parent
+    query._lazy = true if parent._lazy
   else
     query._db = null
     query._type = type or null
@@ -66,7 +67,23 @@ methods.contains = (value) ->
 methods.orderBy = (field) ->
   @_then "orderBy", arguments
 
+# TODO: Support mapping over multiple sequences simultaneously.
+methods.map = (query) ->
+
+  if utils.isQuery query
+    unless query._lazy
+      throw Error "Expected `r.row` or a FUNCTION, but found #{query._type}"
+
+  else if isConstructor query, Function
+    query = Query._expr query Query._row
+
+  @_then "map", arguments
+
 methods.filter = (filter, options) ->
+
+  if isConstructor filter, Function
+    filter = Query._expr filter Query._row
+
   @_then "filter", arguments
 
 methods.isEmpty = ->
@@ -115,53 +132,36 @@ methods.catch = (onRejected) ->
 # Internal
 #
 
-methods._then = (action, args) ->
-  query = Query this, getType action
-  query._action = action
+methods._then = (actionId, args) ->
+  query = Query this, actions[actionId].type
+  query._actionId = actionId
   if args
     query._args = args
     query._parseArgs()
   return query
 
 methods._parseArgs = ->
-  arity = getArity @_action
-  args =
-    if isArray @_args
-    then @_args
-    else sliceArray @_args
+  args = utils.cloneArray @_args
 
-  if args.length < arity[0]
-    throw Error "`#{@_action}` takes at least #{arity[0]} argument#{if arity[0] is 1 then "" else "s"}, #{args.length} provided"
+  if containsQuery args
+    @_args = Query._args args
+    return
 
-  if args.length > arity[1]
-    throw Error "`#{@_action}` takes at most #{arity[1]} argument#{if arity[1] is 1 then "" else "s"}, #{args.length} provided"
-
-  index = -1
-  while ++index < args.length
-    unless utils.isQuery args[index]
-      args[index] = Query._expr args[index]
-
+  utils.assertArity @_actionId, args
   @_args = args
   return
 
 methods._eval = (ctx) ->
-  action = @_action
+  actionId = @_actionId
   result = @_parent._eval ctx
 
-  if isConstructor action, Function
-    return action.call ctx, result
+  args = @_args
+  if utils.isQuery args
+    args = args._run()
+    utils.assertArity actionId, args
 
-  if isConstructor action, String
-    args = utils.resolve @_args
-    arity = getArity(action)[1]
-    result =
-      if arity is 0
-      then actions[action].call ctx, result
-      else if arity is 1
-      then actions[action].call ctx, result, args[0]
-      else if arity is 2
-      then actions[action].call ctx, result, args[0], args[1]
-      else actions[action].call ctx, result, args
+  if isConstructor actionId, String
+    result = actions[actionId].call ctx, result, args
 
   ctx.type =
     if isConstructor @_type, Function
@@ -173,7 +173,7 @@ methods._eval = (ctx) ->
 methods._run = (ctx = {}) ->
   ctx.db = @_db
   result = @_eval ctx
-  if /TABLE|SEQUENCE|SELECTION/.test ctx.type
+  if /TABLE|SELECTION/.test ctx.type
     return utils.clone result
   return result
 
@@ -183,6 +183,7 @@ methods._run = (ctx = {}) ->
 
 statics = {}
 
+# TODO: Evaluate queries from last to first.
 statics._do = (parent, args) ->
 
   unless args.length
@@ -195,24 +196,40 @@ statics._do = (parent, args) ->
   args.unshift parent
 
   if isConstructor last, Function
-    args = args.slice(0, last.length).map Result
-    value = last.apply null, args
+    {length} = last
 
-    if value is undefined
-      throw Error "Anonymous function returned `undefined`. Did you forget a `return`?"
+    # Allow zero arguments, where none of the given queries are evaluated.
+    # Otherwise, enforce the arity of the given function.
+    if (length > 0) and (length isnt args.length)
+      throw Error "Expected function with #{plural "argument", args.length} but found function with #{plural "argument", last.length}"
 
-    unless utils.isQuery value
-      value = Query._expr value
-
+    # TODO: Currently, the given function is called more than once.
+    #   This is different from `rethinkdbdash`, but easier to implement.
+    #   The ideal solution calls the given function once, but also ensures
+    #   the given queries are all called once (no more, no less).
     query._eval = (ctx) ->
-      result = value._eval ctx
-      args.forEach (arg) -> arg._reset()
-      return result
+
+      # Run the given queries once (no more, no less)
+      # only if the given function is using them.
+      value =
+        if length
+        then last.apply null, args.map runOnce
+        else last()
+
+      if value is undefined
+        throw Error "Anonymous function returned `undefined`. Did you forget a `return`?"
+
+      return utils.resolve value, ctx
     return query
 
+  # TODO: Support `r.row` when no function is given.
   query._eval = (ctx) ->
-    args.forEach utils.resolve
-    utils.resolve last, ctx
+    # The given queries are evaluated from last to first.
+    value = utils.resolve last, ctx
+    index = args.length
+    while --index >= 0
+      utils.resolve args[index]
+    return value
   return query
 
 statics._default = (parent, value) ->
@@ -267,22 +284,21 @@ statics._expr = (expr) ->
   if isArrayOrObject expr
     values = expr
     expr = if isArray values then [] else {}
-    Object.keys(values).forEach (key) ->
-      value = values[key]
+    utils.each values, (value, key) ->
 
       unless utils.isQuery value
-        expr[key] = Query._expr value
-        return
+        value = Query._expr value
 
-      if /DATUM|SELECTION/.test value._type
-        expr[key] = value
-        return
+      else if seqRE.test value._type
+        throw Error "Expected type DATUM but found #{value._type}"
 
-      throw Error "Expected type DATUM but found #{value._type}"
+      query._lazy = true if value._lazy
+      expr[key] = value
+      return
 
     query._eval = (ctx) ->
       ctx.type = @_type
-      return utils.resolve expr
+      return utils.resolve expr, ctx
 
   else
     query._eval = (ctx) ->
@@ -291,24 +307,66 @@ statics._expr = (expr) ->
 
   return query
 
+statics._row = do ->
+  query = Query null, "ROW"
+  query._lazy = true
+  query._eval = (ctx) ->
+    ctx.type = "DATUM"
+    return ctx.row if ctx.row
+    throw Error "r.row is not defined in this context"
+  return query
+
+# TODO: Detect queries nested in `r.expr`
+statics._args = (args) ->
+  args = args.map Query._expr
+
+  query = Query null, "ARGS"
+  query._eval = (ctx) ->
+    ctx.type = "DATUM"
+
+    values = []
+    args.forEach (arg) ->
+
+      if arg._lazy
+        values.push arg
+        return
+
+      if arg._type is "ARGS"
+        values = values.concat arg._run()
+        return
+
+      values.push arg._run()
+      return
+
+    return values
+  return query
+
 #
 # Exports
 #
 
-Object.keys(methods).forEach (key) ->
+utils.each methods, (method, key) ->
   define Query.prototype, key,
-    value: methods[key]
-    writable: yes
+    value: method
+    writable: true
 
-Object.keys(statics).forEach (key) ->
-  define Query, key,
-    value: statics[key]
+utils.each statics, (value, key) ->
+  define Query, key, {value}
 
 module.exports = Query
 
 #
 # Helpers
 #
+
+plural = (noun, count) ->
+  return "1 " + noun if count is 1
+  return count + " " + noun + "s"
+
+runOnce = (arg) ->
+  if utils.isQuery arg
+  then Query._expr arg._run()
+  else Query._expr arg
 
 isFalse = (value) ->
   (value is null) or (value is false)
@@ -319,107 +377,22 @@ isArrayOrObject = (value) ->
 isNullError = (error) ->
   !error or /(Index out of bounds|No attribute|null)/i.test error.message
 
-getType = do ->
-  DATUM = "DATUM"
+hasQuery = (object) ->
+  for key, value of object
+    if isConstructor value, Object
+      return yes if hasQuery value
+    else if isArray value
+      return yes if containsQuery value
+    else if utils.isQuery value
+      return yes
+  return no
 
-  seqRE = /TABLE|SEQUENCE/
-
-  # Sequences are preserved.
-  # Tables are converted to sequences.
-  sequential = (ctx) ->
-    return "SEQUENCE" if seqRE.test ctx.type
-    return DATUM
-
-  types =
-    eq: DATUM
-    ne: DATUM
-    gt: DATUM
-    lt: DATUM
-    ge: DATUM
-    le: DATUM
-    or: DATUM
-    and: DATUM
-    add: DATUM
-    sub: DATUM
-    mul: DATUM
-    div: DATUM
-
-    nth: (ctx) ->
-      return "SELECTION" if seqRE.test ctx.type
-      return DATUM
-
-    # For tables and sequences, an index argument results in a selection.
-    bracket: (ctx, args) ->
-      unless isConstructor args[0], String
-        return "SELECTION" if seqRE.test ctx.type
-      return DATUM
-
-    getField: DATUM
-    hasFields: sequential
-    offsetsOf: DATUM
-    contains: DATUM
-    orderBy: sequential
-    filter: sequential
-    fold: null # TODO: Determine `fold` result type.
-    isEmpty: DATUM
-    count: DATUM
-    skip: sequential
-    limit: sequential
-    slice: sequential
-    merge: DATUM
-    pluck: DATUM
-    without: DATUM
-    typeOf: DATUM
-    update: DATUM
-    replace: DATUM
-    delete: DATUM
-
-  return (action) ->
-    types[action]
-
-getArity = do ->
-  none = [0, 0]
-  one = [1, 1]
-  two = [2, 2]
-  oneTwo = [1, 2]
-  onePlus = [1, Infinity]
-
-  arity =
-    eq: onePlus
-    ne: onePlus
-    gt: onePlus
-    lt: onePlus
-    ge: onePlus
-    le: onePlus
-    or: onePlus
-    and: onePlus
-    add: onePlus
-    sub: onePlus
-    mul: onePlus
-    div: onePlus
-    nth: one
-    bracket: one
-    getField: one
-    hasFields: onePlus
-    offsetsOf: one
-    contains: one
-    orderBy: one
-    filter: oneTwo
-    fold: two
-    isEmpty: none
-    count: none
-    skip: one
-    limit: one
-    slice: onePlus
-    merge: onePlus
-    pluck: onePlus
-    without: onePlus
-    typeOf: none
-    getAll: onePlus
-    insert: oneTwo
-    update: one
-    replace: one
-    delete: none
-
-  return (action) ->
-    arity[action]
+containsQuery = (array) ->
+  for value in array
+    if isConstructor value, Object
+      return yes if hasQuery value
+    else if isArray value
+      return yes if containsQuery value
+    else if utils.isQuery value
+      return yes
+  return no

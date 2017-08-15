@@ -1,5 +1,5 @@
 
-describe "Table()", ->
+describe "Table", ->
 
   beforeAll ->
     db.init users: []
@@ -41,6 +41,10 @@ describe "Table()", ->
       res = query._run()
       expect(res.errors).toBe 2
       expect(res.inserted).toBe 1
+
+    it "supports nested queries", ->
+      users.insert(id: 4, name: db.expr "John")._run()
+      expect(users.get(4)._run()).toEqual {id: 4, name: "John"}
 
   describe ".get()", ->
 

@@ -8,6 +8,7 @@ hasKeys = require "hasKeys"
 
 typeNames =
   boolean: "BOOL"
+  function: "FUNCTION"
   number: "NUMBER"
   object: "OBJECT"
   string: "STRING"
@@ -35,17 +36,17 @@ utils.getField = (value, attr) ->
 
 utils.hasFields = (value, attrs) ->
   for attr in attrs
-    return no unless value.hasOwnProperty attr
-  return yes
+    return false unless value.hasOwnProperty attr
+  return true
 
 utils.equals = (value1, value2) ->
 
   if isArray value1
-    return no unless isArray value2
+    return false unless isArray value2
     return arrayEquals value1, value2
 
   if isConstructor value1, Object
-    return no unless isConstructor value2, Object
+    return false unless isConstructor value2, Object
     return objectEquals value1, value2
 
   return value1 is value2
@@ -70,19 +71,9 @@ utils.without = (input, keys) ->
       output[key] = value
   return output
 
-utils.merge = (output, inputs) ->
-  output = utils.clone output
-
-  for input in inputs
-    output = merge output, input
-
-  if isArray output
-    return utils.resolve output
-  return output
-
 # Returns true if the `patch` changed at least one value.
 utils.update = (object, patch) ->
-  return no if patch is null
+  return false if patch is null
 
   if "OBJECT" isnt utils.typeOf patch
     throw Error "Inserted value must be an OBJECT (got #{utils.typeOf patch})"
@@ -94,28 +85,31 @@ utils.update = (object, patch) ->
   return !!update object, patch
 
 # Replicate an object or array (a simpler alternative to `utils.merge`)
-utils.clone = (values) ->
+utils.clone = (value) ->
+  return null if value is null
+  return utils.cloneArray value if isArray value
+  return utils.cloneObject value if isConstructor value, Object
+  return value
 
-  if values is null
-    return null
-
-  if isArray values
-    return values.map (value) ->
-      if isArrayOrObject value
-      then utils.clone value
-      else value
-
-  clone = {}
-  for key, value of values
-    clone[key] =
-      if isArrayOrObject value
-      then utils.clone value
-      else value
-
+utils.cloneArray = (values) ->
+  clone = new Array values.length
+  for value, index in values
+    clone[index] = utils.clone value
   return clone
 
-# Resolves any queries found in a value.
-# Throws an error for undefined values.
+utils.cloneObject = (values) ->
+  clone = {}
+  for key, value of values
+    clone[key] = utils.clone value
+  return clone
+
+utils.each = (values, iterator) ->
+  for key, value of values
+    iterator value, key
+  return
+
+# Resolve all queries, cloning any selections.
+# If a context is passed, its `type` is mutated.
 utils.resolve = (value, ctx) ->
 
   if utils.isQuery value
@@ -124,10 +118,10 @@ utils.resolve = (value, ctx) ->
   ctx?.type = "DATUM"
 
   if isArray value
-    return resolveArray value
+    return resolveArray value, ctx
 
   if isConstructor value, Object
-    return resolveObject value
+    return resolveObject value, ctx
 
   return value
 
@@ -137,25 +131,22 @@ utils.resolve = (value, ctx) ->
 
 inherits = (value, types) ->
   for type in types
-    return yes if value instanceof type
-  return no
-
-isArrayOrObject = (value) ->
-  isArray(value) or isConstructor(value, Object)
+    return true if value instanceof type
+  return false
 
 arrayEquals = (array1, array2) ->
-  return no if array1.length isnt array2.length
+  return false if array1.length isnt array2.length
   for value1, index in array1
-    return no unless utils.equals value1, array2[index]
-  return yes
+    return false unless utils.equals value1, array2[index]
+  return true
 
 objectEquals = (object1, object2) ->
   keys = Object.keys object1
   for key in Object.keys object2
-    return no unless ~keys.indexOf key
+    return false unless ~keys.indexOf key
   for key in keys
-    return no unless utils.equals object1[key], object2[key]
-  return yes
+    return false unless utils.equals object1[key], object2[key]
+  return true
 
 pluckWithArray = (array, input, output) ->
   array = utils.flatten array
@@ -206,24 +197,6 @@ pluckWithObject = (object, input, output) ->
   return output
 
 # NOTE: Nested queries must be resolved before calling this function.
-merge = (output, input) ->
-
-  # Non-objects overwrite the output.
-  return input unless isConstructor input, Object
-
-  # Nothing to merge into.
-  return input unless isConstructor output, Object
-
-  for key, value of input
-    if isConstructor value, Object
-      if isConstructor output[key], Object
-      then merge output[key], value
-      else output[key] = value
-    else output[key] = value
-
-  return output
-
-# NOTE: Nested queries must be resolved before calling this function.
 update = (output, input) ->
   changes = 0
   for key, value of input
@@ -232,7 +205,7 @@ update = (output, input) ->
 
       unless isConstructor output[key], Object
         changes += 1
-        output[key] = utils.clone value
+        output[key] = utils.cloneObject value
         continue
 
       changes += update output[key], value
@@ -243,7 +216,7 @@ update = (output, input) ->
         continue if arrayEquals value, output[key]
 
       changes += 1
-      output[key] = utils.clone value
+      output[key] = utils.cloneArray value
 
     else if value isnt output[key]
       changes += 1
@@ -251,36 +224,26 @@ update = (output, input) ->
 
   return changes
 
-resolveArray = (values) ->
-  clone = []
-  for value, index in values
+resolve = (value, ctx) ->
 
-    if isArray value
-      clone.push resolveArray value
+  if isArray value
+    return resolveArray value, ctx
 
-    else if isConstructor value, Object
-      clone.push resolveObject value
+  if isConstructor value, Object
+    return resolveObject value, ctx
 
-    else if utils.isQuery value
-      clone.push value._run()
+  if utils.isQuery value
+    ctx = Object.assign {}, ctx
+    return value._run ctx
 
-    else clone.push value
+  return value
 
-  return clone
+resolveArray = (values, ctx) ->
+  values.map (value) ->
+    resolve value, ctx
 
-resolveObject = (values) ->
+resolveObject = (values, ctx) ->
   clone = {}
   for key, value of values
-
-    if isArray value
-      clone[key] = resolveArray value
-
-    else if isConstructor value, Object
-      clone[key] = resolveObject value
-
-    else if utils.isQuery value
-      clone[key] = value._run()
-
-    else clone[key] = value
-
+    clone[key] = resolve value, ctx
   return clone
